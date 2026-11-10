@@ -1,4 +1,4 @@
-/* Bee Swarm Simulator (single-player recreation) - dev tools v2
+/* Bee Swarm Simulator (single-player recreation) - dev tools v3
  *
  * Works with the ORIGINAL index (limited: no gear unlock / teleport) or the
  * patched one (full). Load into a save, open the console, paste this file.
@@ -61,7 +61,7 @@
 
         help() {
             console.log(Object.keys(cheat).join('\n'))
-            console.log('Examples:\n cheat.setLevel(100)\n cheat.addSlots(20)\n cheat.damage(50)\n cheat.speed(3)\n cheat.jump(2)\n cheat.mutateAll()\n cheat.polarPower(500)\n cheat.nectars(24)\n cheat.allEffects(2)\n cheat.finishQuests()\n cheat.talkToAll(2)\n cheat.allItems(9999)')
+            console.log('Examples:\n cheat.setLevel(100)\n cheat.addSlots(20)\n cheat.damage(50)\n cheat.speed(3)\n cheat.jump(2)\n cheat.mutateAll()\n cheat.polarPower(500)\n cheat.nectars(24)\n cheat.goodEffects(2)\n cheat.badEffects(30)\n cheat.effectReport()\n cheat.health(1000)\n cheat.resetMobTimers()\n cheat.finishQuests()\n cheat.talkToAll(2)\n cheat.allItems(9999)')
         },
 
         /* ---- resources ---- */
@@ -224,30 +224,73 @@
             return 'all 5 nectars active for ' + hours + ' hour(s)'
         },
 
-        // every beneficial effect/buff (skips debuffs, challenge effects, passives, and anything that errors)
-        allEffects(hours = 1) {
-            const skip = /^(corruption|glitch|mindHack|mapCorruption|frozen|beesmasRepentance|scratch|impale|antChallenge|roboChallengeBuff|fetch|targetPractice|smiley|bearMorph.*|tornado|rainCloud|polarPower)$/
-            const given = [], failed = []
+        // ---- effect classification ----
+        // Dry-runs every effect on a throw-away copy of your CURRENT stats and sorts it:
+        //   good    = raises at least one stat and lowers/breaks none
+        //   bad     = lowers a stat, or turns one into NaN/Infinity (this is what wipes damage/pollen)
+        //   neutral = changes no stats (ability tokens, field boosts, etc.)  -> never given
+        //   error   = update() threw during the dry run                       -> never given
+        effectReport() {
+            const real = P()
+            const out = { good: [], bad: [], neutral: [], error: [], ignored: [] }
+            const noop = () => {}
             for (const n in W.effects) {
                 const E = W.effects[n]
-                if (skip.test(n) || E.isPassive || /Passive$/.test(n) || !E.svg || !E.update) continue
-                try {
-                    E.update(1, P())                         // dry run: skip anything that would throw each tick
-                    if (E.amountFromCooldown) {
-                        E.maxCooldown = Math.max(E.maxCooldown, hours * 3600)
-                        P().addEffect(n, 1)
-                    } else {
-                        if (isFinite(E.maxCooldown) && E.maxCooldown > 0) E.maxCooldown = Math.max(E.maxCooldown, hours * 3600)
-                        const amt = isFinite(E.maxAmount) ? E.maxAmount : 1
-                        P().addEffect(n, false, false, amt)
-                        const e = P().effects.find(x => x.type === n)
-                        if (e && isFinite(E.maxCooldown) && E.maxCooldown > 0) e.cooldown = E.maxCooldown
+                if (!E || !E.svg || typeof E.update !== 'function' || E.isPassive || /Passive$/.test(n) || !(E.maxCooldown > 0)) { out.ignored.push(n); continue }
+                let inc = false, dec = false, threw = false
+                const amts = [1]
+                if (isFinite(E.maxAmount) && E.maxAmount > 1) amts.push(Math.min(E.maxAmount, 10))
+                for (const amt of amts) {
+                    const fake = Object.assign({}, real)
+                    for (const k in real.defaultStats) fake[k] = real.defaultStats[k]
+                    // nothing inside update() may touch the real game
+                    ;['addEffect', 'addMessage', 'updateHive', 'computeStats', 'resetStats', 'updateInventory', 'addSlot', 'damage'].forEach(k => { fake[k] = noop })
+                    const before = {}
+                    for (const k in fake) if (typeof fake[k] === 'number') before[k] = fake[k]
+                    try { E.update(amt, fake) } catch (err) { threw = true; break }
+                    for (const k in before) {
+                        const v = fake[k]
+                        if (typeof v !== 'number' || !isFinite(v)) { if (isFinite(before[k])) dec = true; continue }
+                        if (v < before[k] - 1e-9) dec = true
+                        else if (v > before[k] + 1e-9) inc = true
                     }
-                    given.push(n)
-                } catch (err) { failed.push(n) }
+                }
+                if (threw) out.error.push(n)
+                else if (dec) out.bad.push(n)
+                else if (inc) out.good.push(n)
+                else out.neutral.push(n)
             }
+            return out
+        },
+
+        _giveEffect(n, secs) {
+            const E = W.effects[n]
+            if (E.amountFromCooldown) {
+                E.maxCooldown = Math.max(E.maxCooldown, secs)
+                P().addEffect(n, 1)
+            } else {
+                if (isFinite(E.maxCooldown) && E.maxCooldown > 0) E.maxCooldown = Math.max(E.maxCooldown, secs)
+                const amt = isFinite(E.maxAmount) ? E.maxAmount : 1
+                P().addEffect(n, false, false, amt)
+            }
+            const e = P().effects.find(x => x.type === n)
+            if (e && isFinite(E.maxCooldown)) e.cooldown = E.maxCooldown
+        },
+
+        // every GOOD effect, at max stacks, for `hours` (real time). Anything that would lower or break a stat is left out.
+        goodEffects(hours = 1) {
+            const rep = cheat.effectReport()
+            rep.good.forEach(n => cheat._giveEffect(n, hours * 3600))
             try { P().resetStats() } catch (e) {}
-            return given.length + ' effects given for ~' + hours + 'h' + (failed.length ? ' (' + failed.length + ' skipped: ' + failed.join(', ') + ')' : '')
+            return rep.good.length + ' good effects given for ~' + hours + 'h'
+        },
+        allEffects(hours = 1) { return cheat.goodEffects(hours) },   // old name, now good-only
+
+        // every BAD effect for `seconds` (default 30s so they wear off by themselves; clearEffects removes them early)
+        badEffects(seconds = 30) {
+            const rep = cheat.effectReport()
+            rep.bad.forEach(n => cheat._giveEffect(n, seconds))
+            return rep.bad.length + ' bad effects given for ~' + seconds + 's: ' + rep.bad.join(', ')
         },
         clearEffects() {
             const list = P().effects
@@ -329,6 +372,53 @@
             try { p.updateInventory() } catch (e) {}
             try { p.updateHive(); cheat._reapplyLevel() } catch (e) {}
             return 'finished dialogue for: ' + done.join(', ') + (capped.length ? ' (hit step limit: ' + capped.join(', ') + ')' : '')
+        },
+
+        /* ---- NEW: custom health ---- */
+        // The game hard-codes health at 100 (the regen and bar both clamp to 100), so "health = H" is done by
+        // scaling the damage you take by 100/H. 1000 = takes 10x less damage, Infinity = takes none.
+        // Falling into the void and "Reset Character" still kill you.
+        health(H = 1000) {
+            const p = P()
+            if (!state.origDamage) state.origDamage = p.damage
+            const orig = state.origDamage
+            if (!(H > 0)) { console.warn('health must be > 0'); return }
+            if (H === 100) { p.damage = orig; p.health = 100; return 'health back to normal (100)' }
+            if (H === Infinity) p.damage = () => {}
+            else p.damage = am => orig.call(p, am * 100 / H)
+            p.health = 100
+            return 'health = ' + H + (H === Infinity ? ' (invincible)' : ' (damage taken x' + (100 / H).toFixed(4) + ')')
+        },
+        heal() { P().health = 100; return 'healed' },
+
+        /* ---- NEW: reset mob timers ---- */
+        // Respawns every dead field mob (Rhino Beetles, Ladybugs, Spiders, Werewolf, Mantis, Scorpions, King Beetle,
+        // Tunnel Bear) plus the Coconut Crab and Stump Snail. Mobs inside the field you are standing in come back
+        // once you step out. Mondo Chick / Vicious Bee / Puffshroom spawn on the real-world clock and can't be reset from here.
+        resetMobTimers() {
+            const p = P(), mobs = W.objects && W.objects.mobs
+            if (!mobs) return needFull('resetMobTimers (objects not exposed)')
+            let bugs = 0, special = []
+            for (const m of mobs) {
+                if (m && 'respawnTimer' in m && m.id && m.type) {                // BugMob family
+                    if (m.respawnTimer > 0 || m.state === 'dead') { m.respawnTimer = 0; bugs++ }
+                    p.extraInfo[m.id] = 0
+                } else if (m && 'isDead' in m && m.isDead > 0) {
+                    const nm = m.constructor && m.constructor.name
+                    if (nm === 'StumpSnail') {            // revive in place (its own die() would spawn a crab)
+                        m.isDead = 0; m.health = 5000000
+                        p.extraInfo.mob_snail = 0; p.extraInfo.mob_snail_health = 5000000
+                        special.push('Stump Snail')
+                    } else {                              // Coconut Crab: let it respawn through its normal path
+                        m.isDead = 0.001
+                        p.extraInfo.mob_coco = 0
+                        special.push('Coconut Crab')
+                    }
+                }
+            }
+            // also clear any saved timers for mobs that aren't loaded
+            for (const k in p.extraInfo) if (/^mob_/.test(k) && typeof p.extraInfo[k] === 'number' && !/health$/.test(k) && p.extraInfo[k] > 0) p.extraInfo[k] = 0
+            return bugs + ' mobs respawned' + (special.length ? ' + ' + special.join(', ') : '') + ' (stand outside the field to see them return)'
         },
 
         /* ---- gear / shops (patched index only) ---- */
@@ -442,12 +532,20 @@
     btn('Walk speed multiplier...', withNum('Speed multiplier (1 = normal):', 2, cheat.speed))
     btn('Jump power multiplier...', withNum('Jump multiplier (1 = normal):', 2, cheat.jump))
     btn('Reset speed & jump', cheat.resetMovement)
+    btn('Custom health...', withNum('Health (100 = normal, 1000 = 10x tougher, Infinity = invincible):', 1000, cheat.health))
+    btn('Heal to full', cheat.heal)
 
     heading('Buffs')
     btn('Polar Power amount...', withNum('Polar Power stacks (x1 + 0.05 per stack bee energy):', 500, cheat.polarPower))
     btn('All 5 nectars (hours)...', withNum('Hours of nectar (real time):', 24, cheat.nectars))
-    btn('All status effects (hours)...', withNum('Hours for buffs:', 1, cheat.allEffects))
+    btn('All GOOD effects (hours)...', withNum('Hours for good buffs (only effects that raise stats):', 1, cheat.goodEffects))
+    btn('All BAD effects (seconds)...', withNum('Seconds for bad effects (Clear all effects removes them):', 30, cheat.badEffects))
+    btn('List good / bad effects (console)', () => { const r = cheat.effectReport(); console.log(r); return 'good ' + r.good.length + ' / bad ' + r.bad.length + ' (see console)' })
     btn('Clear all effects', cheat.clearEffects)
+
+
+    heading('World')
+    btn('Reset mob timers', cheat.resetMobTimers)
 
     heading('Quests / NPCs')
     btn('Complete all active quests', cheat.finishQuests)
@@ -467,5 +565,5 @@
         })
     }
 
-    console.log('[cheats] v2 ' + (FULL ? 'full' : 'LIMITED (original index: no gear/teleport)') + ' mode ready. Press ` for the panel, or cheat.help()')
+    console.log('[cheats] v3 ' + (FULL ? 'full' : 'LIMITED (original index: no gear/teleport)') + ' mode ready. Press ` for the panel, or cheat.help()')
 })()
