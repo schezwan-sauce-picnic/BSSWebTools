@@ -1,8 +1,8 @@
-/* Bee Swarm Simulator (single-player recreation) - dev tools v3
+/* Bee Swarm Simulator (single-player recreation) - dev tools v4
  *
  * Works with the ORIGINAL index (limited: no gear unlock / teleport) or the
  * patched one (full). Load into a save, open the console, paste this file.
- * Toggle the panel with the ` (backtick) key. Everything is also available
+ * Press ` (backtick) to open the panel; you'll be asked for a name and password first. Everything is also available
  * as cheat.<name>(...) - run cheat.help() for the list.
  */
 (function () {
@@ -465,6 +465,125 @@
         saveCode() { return W.getSaveCode ? W.getSaveCode() : '(patched index required)' },
         loadCode(s) { return W.loadSaveCode && W.loadSaveCode(s) },
     }
+    /* ------------------------------------------------------------------ */
+    /*  access gate: name check (ban) -> password -> short lockout on a   */
+    /*  wrong password. Asked once per load; run cheat.logout() to relock */
+    /* ------------------------------------------------------------------ */
+    const GATE = {
+        banned: ['loren'],            // compared case-insensitively, so Loren / LOREN / loren / LoReN all match
+        hash: 6281145399787228,       // hash of the password (not stored in plain text)
+        lockSeconds: 5,               // lockout after a wrong password
+        banKey: 'bss_dev_banned',     // localStorage key that remembers a ban
+    }
+    const h53 = (str, seed = 0) => {  // cyrb53 string hash
+        let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed
+        for (let i = 0, ch; i < str.length; i++) { ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677) }
+        h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+        h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+        return 4294967296 * (2097151 & h2) + (h1 >>> 0)
+    }
+    const auth = { unlocked: false, banned: false, lockUntil: 0, modal: null }
+    try { if (W.localStorage.getItem(GATE.banKey)) auth.banned = true } catch (e) {}
+
+    const toast = (msg, ms = 2600) => {
+        const d = W.document
+        const old = d.getElementById('cheatToast'); if (old) old.remove()
+        const t = d.createElement('div')
+        t.id = 'cheatToast'
+        t.textContent = msg
+        t.style.cssText = 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:100001;background:rgba(20,20,20,.95);color:#fff;font:14px trebuchet ms,sans-serif;padding:10px 16px;border-radius:10px;pointer-events:none'
+        d.body.appendChild(t)
+        setTimeout(() => { try { t.remove() } catch (e) {} }, ms)
+    }
+    const setPanel = show => { const p = W.document.getElementById('cheatPanelV4'); if (p) p.style.display = show ? 'block' : 'none' }
+    const closeModal = () => { if (auth.modal) { try { auth.modal.ov.remove() } catch (e) {} auth.modal = null } }
+
+    function showModal(title, sub, secret, onSubmit) {
+        closeModal()
+        const d = W.document
+        try { if (d.exitPointerLock) d.exitPointerLock() } catch (e) {}
+        const ov = d.createElement('div')
+        ov.id = 'cheatGate'
+        ov.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:100000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;font:14px trebuchet ms,sans-serif'
+        const card = d.createElement('div')
+        card.style.cssText = 'background:#1c1c1c;color:#fff;padding:18px 20px;border-radius:12px;width:280px;box-shadow:0 6px 30px rgba(0,0,0,.6)'
+        const t = d.createElement('div'); t.textContent = title; t.style.cssText = 'font-weight:bold;font-size:16px;margin-bottom:4px'
+        const s = d.createElement('div'); s.textContent = sub; s.style.cssText = 'opacity:.65;font-size:12px;margin-bottom:10px'
+        const inp = d.createElement('input')
+        inp.id = 'cheatGateInput'; inp.type = secret ? 'password' : 'text'; inp.autocomplete = 'off'
+        inp.style.cssText = 'width:100%;box-sizing:border-box;padding:8px;border-radius:6px;border:1px solid #555;background:#111;color:#fff;font-size:14px'
+        const hint = d.createElement('div'); hint.textContent = 'Enter to continue, Esc to cancel'; hint.style.cssText = 'opacity:.45;font-size:11px;margin-top:8px'
+        card.appendChild(t); card.appendChild(s); card.appendChild(inp); card.appendChild(hint)
+        ov.appendChild(card)
+        ov.onmousedown = ov.onclick = e => e.stopPropagation()
+        d.body.appendChild(ov)
+        auth.modal = { ov, inp, onSubmit }
+        setTimeout(() => { try { inp.focus() } catch (e) {} }, 0)
+    }
+
+    function doBan() {
+        auth.banned = true; auth.unlocked = false
+        try { W.localStorage.setItem(GATE.banKey, '1') } catch (e) {}
+        closeModal(); setPanel(false)
+        toast('You have been banned.', 6000)
+    }
+
+    function askLogin() {
+        showModal('Developer tools', 'Enter your name', false, name => {
+            const clean = String(name).trim()
+            if (!clean) return
+            if (GATE.banned.indexOf(clean.toLowerCase()) > -1) return doBan()
+            showModal('Welcome, ' + clean.slice(0, 30), 'Enter the password', true, pw => {
+                if (h53(String(pw)) === GATE.hash) {
+                    closeModal(); auth.unlocked = true; setPanel(true); toast('Unlocked')
+                } else {
+                    closeModal()
+                    auth.lockUntil = Date.now() + GATE.lockSeconds * 1000
+                    toast('Wrong password. Locked for ' + GATE.lockSeconds + ' seconds.')
+                }
+            })
+        })
+    }
+
+    function openCheats() {
+        if (auth.banned) return toast('You are banned.')
+        const wait = Math.ceil((auth.lockUntil - Date.now()) / 1000)
+        if (wait > 0) return toast('Locked. Try again in ' + wait + ' second' + (wait === 1 ? '' : 's') + '.')
+        if (auth.modal) return
+        if (auth.unlocked) { const p = W.document.getElementById('cheatPanelV4'); return setPanel(!p || p.style.display === 'none') }
+        askLogin()
+    }
+
+    // while the login box is open, keep typing away from the game (WASD, r, i ...) and handle Enter / Esc
+    const gateKeys = e => {
+        const m = auth.modal
+        if (!m || e.target !== m.inp) return
+        e.stopPropagation()
+        if (e.type !== 'keydown') return
+        if (e.key === 'Enter') { e.preventDefault(); m.onSubmit(m.inp.value) }
+        else if (e.key === 'Escape') { e.preventDefault(); closeModal() }
+    }
+    ;['keydown', 'keyup', 'keypress'].forEach(type => {
+        if (W.__cheatGateKeys) W.removeEventListener(type, W.__cheatGateKeys, true)
+        W.addEventListener(type, gateKeys, true)
+    })
+    W.__cheatGateKeys = gateKeys
+
+    cheat.login = () => { if (auth.banned) return 'banned'; if (auth.unlocked) return 'already unlocked'; openCheats(); return 'login prompt opened' }
+    cheat.logout = () => { auth.unlocked = false; setPanel(false); return 'locked again' }
+
+    // the console API is gated too, otherwise cheat.everything() would skip the login
+    const OPEN_FNS = ['help', 'login', 'logout']
+    Object.keys(cheat).forEach(k => {
+        const f = cheat[k]
+        if (typeof f !== 'function' || k[0] === '_' || OPEN_FNS.indexOf(k) > -1) return
+        cheat[k] = function () {
+            if (auth.banned) { console.warn('[cheats] you are banned.'); return 'banned' }
+            if (!auth.unlocked) { console.warn('[cheats] locked - press ` or run cheat.login()'); return 'locked' }
+            return f.apply(cheat, arguments)
+        }
+    })
+
     window.cheat = cheat
     if (W !== window) W.cheat = cheat
 
@@ -472,9 +591,9 @@
     /*  on-screen panel                                                   */
     /* ------------------------------------------------------------------ */
     const doc = W.document
-    if (doc.getElementById('cheatPanel')) doc.getElementById('cheatPanel').remove()
+    ;['cheatPanel', 'cheatPanelV4'].forEach(id => { const old = doc.getElementById(id); if (old) old.remove() })
     const panel = doc.createElement('div')
-    panel.id = 'cheatPanel'
+    panel.id = 'cheatPanelV4'
     panel.style.cssText = 'position:fixed;top:10px;right:10px;z-index:99999;background:rgba(20,20,20,.94);color:#fff;font:13px trebuchet ms,sans-serif;padding:10px;border-radius:10px;width:240px;max-height:88vh;overflow-y:auto;display:none;user-select:none'
     panel.innerHTML = '<div style="font-weight:bold;margin-bottom:4px">Dev Tools <span style="float:right;opacity:.6">` to hide</span></div>'
     const log = doc.createElement('div')
@@ -558,12 +677,10 @@
     panel.onmousedown = panel.onclick = e => e.stopPropagation()
     doc.body.appendChild(panel)
 
-    if (!W.__cheatKey) {
-        W.__cheatKey = true
-        W.addEventListener('keydown', e => {
-            if (e.key === '`') { const p = doc.getElementById('cheatPanel'); if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none' }
-        })
-    }
+    const toggleKey = e => { if (e.key === '`') openCheats() }
+    if (W.__cheatToggleKey) W.removeEventListener('keydown', W.__cheatToggleKey)
+    W.__cheatToggleKey = toggleKey
+    W.addEventListener('keydown', toggleKey)
 
-    console.log('[cheats] v3 ' + (FULL ? 'full' : 'LIMITED (original index: no gear/teleport)') + ' mode ready. Press ` for the panel, or cheat.help()')
+    console.log('[cheats] v4 ' + (FULL ? 'full' : 'LIMITED (original index: no gear/teleport)') + ' mode ready. Press ` to open (login required), or cheat.login() / cheat.help()')
 })()
